@@ -206,9 +206,6 @@ class MSFTPairedDataset(Dataset):
             self.class_to_indices = {}
             for i, (_, label) in enumerate(self.dataset.samples):
                 self.class_to_indices.setdefault(label, []).append(i)
-    
-    # Alias so MSFTDataset and MSFTPairedDataset share the same parameter API
-    MSFTPairedDataset.__init__.__doc__ = MSFTDataset.__init__.__doc__
 
     def __len__(self):
         return len(self.dataset)
