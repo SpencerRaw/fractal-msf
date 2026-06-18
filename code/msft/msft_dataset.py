@@ -23,18 +23,25 @@ class MSFTDataset(Dataset):
     Multi-Scale Fragment Training dataset wrapper.
     
     对每张原图，采样多尺度碎片。返回一个 dict，包含各尺度的 patch。
+    
+    默认配置 (64×64 图像):
+      D₀: 4×4 高清局部 (原始分辨率)
+      D₁: 16×16 区域 ↓4 → 4×4 effective
+      D₂: 64×64 全图 ↓16 → 4×4 effective
+    
+    所有尺度的 token 数相同 = patch_size × patch_size = 16。
     """
 
     def __init__(
         self,
         root: str,
-        img_size: int = 256,
-        patch_size: int = 16,
-        n_highres: int = 5,          # 每张图采多少个高清 patch (D₀)
-        n_midres: int = 2,            # 每张图采多少个中分辨 region (D₁)
-        midres_span: int = 64,        # D₁ 的空间跨度 (64×64 区域)
-        midres_downsample: int = 4,   # D₁ 下采样倍数 (64/4=16 effective)
-        full_downsample: int = 16,    # D₂ 下采样倍数 (256/16=16 effective)
+        img_size: int = 64,
+        patch_size: int = 4,
+        n_highres: int = 8,            # 每张图采多少个高清 patch (D₀)
+        n_midres: int = 3,              # 每张图采多少个中分辨 region (D₁)
+        midres_span: int = 16,          # D₁ 的空间跨度 (16×16 区域)
+        midres_downsample: int = 4,     # D₁ 下采样倍数 (16/4=4 effective)
+        full_downsample: int = 16,      # D₂ 下采样倍数 (64/16=4 effective)
         train: bool = True,
         transform_base=None,          # 基础 transform (如随机水平翻转)
         normalize=True,
@@ -159,10 +166,10 @@ class MSFTPairedDataset(Dataset):
     def __init__(
         self,
         root: str,
-        img_size: int = 256,
-        patch_size: int = 16,
+        img_size: int = 64,
+        patch_size: int = 4,
         n_levels: int = 3,
-        midres_span: int = 64,
+        midres_span: int = 16,
         midres_downsample: int = 4,
         full_downsample: int = 16,
         train: bool = True,
@@ -199,6 +206,9 @@ class MSFTPairedDataset(Dataset):
             self.class_to_indices = {}
             for i, (_, label) in enumerate(self.dataset.samples):
                 self.class_to_indices.setdefault(label, []).append(i)
+    
+    # Alias so MSFTDataset and MSFTPairedDataset share the same parameter API
+    MSFTPairedDataset.__init__.__doc__ = MSFTDataset.__init__.__doc__
 
     def __len__(self):
         return len(self.dataset)
