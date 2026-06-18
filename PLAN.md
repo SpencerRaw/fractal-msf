@@ -247,13 +247,24 @@ Protocol C: 逐层 + 端到端 (Phase 1 + 2)
 → FID, training stability
 ```
 
-#### Exp 5: Spatial Alignment
-**Q**: 碎片间是否需要显式空间对齐？
+#### Exp 5: Pairing Mode — Same-image vs Same-class vs Random
+**Q**: 不同尺度的碎片需要来自同一张原图吗？还是同一类别即可？
+
+**对应 MD 的动机**：不同尺度的模拟可能是分开跑的（同一体系，不同 run），不存在严格的空间对齐。
 
 ```
-Aligned: D₀ ⊂ D₁ ⊂ D₂（来自原图同一区域）
-Unaligned: D₀, D₁, D₂ 来自随机位置
-→ FID 差异
+配对方式：
+  Same-image: D₀, D₁, D₂ 来自同一张 dog_A.jpg
+    = 同一次全原子 MD + 自己粗粒化
+  Same-class:  D₀ 来自 dog_A, D₁ 来自 dog_B, D₂ 来自 dog_C
+    = 不同模拟 run，同一体系同一条件
+  Random:      D₀, D₁, D₂ 来自随机类别
+    = 完全无关的体系
+
+→ FID (Same-image) ≤ FID (Same-class) ≪ FID (Random)
+→ 如果 Same-class 接近 Same-image (ΔFID < 2)：
+  证明只需要同一体系、不需要同一次模拟
+  → 对 MD 领域是极强 claim
 ```
 
 #### Exp 6: Scaling Study

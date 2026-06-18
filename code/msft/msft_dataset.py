@@ -144,10 +144,15 @@ class MSFTDataset(Dataset):
 class MSFTPairedDataset(Dataset):
     """
     Paired MSFT dataset for Phase 2 (end-to-end alignment).
-    
-    从同一张原图中采样空间对齐的多尺度碎片：
-      - D₀ ⊂ D₁ ⊂ D₂（空间包含关系）
-    
+
+    Supports three pairing modes:
+      - 'same_image': D₀ ⊂ D₁ ⊂ D₂ 来自同一张原图（空间包含关系）
+      - 'same_class': D₀, D₁, D₂ 来自同一类别但不同图片
+      - 'random':     D₀, D₁, D₂ 来自随机类别/图片
+
+    'same_class' 对应 MD 场景：不同尺度的模拟是分开跑的，
+    但采样同一物理体系（相同的热力学条件 → 相同分布）。
+
     用于 BFS 端到端训练时保证层间一致性。
     """
 
@@ -161,6 +166,7 @@ class MSFTPairedDataset(Dataset):
         midres_downsample: int = 4,
         full_downsample: int = 16,
         train: bool = True,
+        pairing_mode: str = 'same_image',
     ):
         super().__init__()
         
@@ -170,7 +176,10 @@ class MSFTPairedDataset(Dataset):
         self.midres_span = midres_span
         self.midres_downsample = midres_downsample
         self.full_downsample = full_downsample
-        
+        self.pairing_mode = pairing_mode
+        assert pairing_mode in ('same_image', 'same_class', 'random'), \
+            f"pairing_mode must be 'same_image', 'same_class', or 'random', got '{pairing_mode}'"
+
         self.norm_mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
         self.norm_std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
         
@@ -184,6 +193,12 @@ class MSFTPairedDataset(Dataset):
         ])
         
         self.dataset = ImageFolder(dataset_path, transform=transform)
+        
+        # For same_class mode: build class → indices mapping
+        if pairing_mode == 'same_class':
+            self.class_to_indices = {}
+            for i, (_, label) in enumerate(self.dataset.samples):
+                self.class_to_indices.setdefault(label, []).append(i)
 
     def __len__(self):
         return len(self.dataset)
@@ -201,33 +216,90 @@ class MSFTPairedDataset(Dataset):
         img = self._normalize(img)
         
         result = {'label': label}
-        
-        # 随机选一个 midres_span×midres_span 的锚定区域
-        grid_size = self.img_size // self.midres_span  # 256/64 = 4
-        gi = np.random.randint(0, grid_size)
-        gj = np.random.randint(0, grid_size)
-        
-        # D₂: 低清全图
-        full_low = self._downsample(img, self.full_downsample)
-        result['full_low'] = full_low
-        
-        # D₁: 中分辨区域（对齐）
-        y1, y2 = gi * self.midres_span, (gi + 1) * self.midres_span
-        x1, x2 = gj * self.midres_span, (gj + 1) * self.midres_span
-        region = img[:, y1:y2, x1:x2]
-        midres_low = self._downsample(region, self.midres_downsample)
-        result['midres'] = midres_low  # (3, 16, 16)
-        
-        # D₀: 高清局部（在 anchor region 内随机选一个 patch）
-        if self.n_levels >= 3:
-            sub_grid = self.midres_span // self.patch_size  # 64/16 = 4
-            si = np.random.randint(0, sub_grid)
-            sj = np.random.randint(0, sub_grid)
-            py1, py2 = si * self.patch_size, (si + 1) * self.patch_size
-            px1, px2 = sj * self.patch_size, (sj + 1) * self.patch_size
-            patch = region[:, py1:py2, px1:px2]
-            result['highres'] = patch  # (3, 16, 16)
-        
+
+        if self.pairing_mode == 'same_image':
+            # ── Same-image: D₀ ⊂ D₁ ⊂ D₂ from the same image ──
+            # 随机选一个 midres_span×midres_span 的锚定区域
+            grid_size = self.img_size // self.midres_span
+            gi = np.random.randint(0, grid_size)
+            gj = np.random.randint(0, grid_size)
+            
+            # D₂: 低清全图
+            result['full_low'] = self._downsample(img, self.full_downsample)
+            
+            # D₁: 中分辨区域（空间对齐）
+            y1, y2 = gi * self.midres_span, (gi + 1) * self.midres_span
+            x1, x2 = gj * self.midres_span, (gj + 1) * self.midres_span
+            region = img[:, y1:y2, x1:x2]
+            result['midres'] = self._downsample(region, self.midres_downsample)
+            
+            # D₀: 高清局部（在 anchor region 内）
+            if self.n_levels >= 3:
+                sub_grid = self.midres_span // self.patch_size
+                si = np.random.randint(0, sub_grid)
+                sj = np.random.randint(0, sub_grid)
+                py1, py2 = si * self.patch_size, (si + 1) * self.patch_size
+                px1, px2 = sj * self.patch_size, (sj + 1) * self.patch_size
+                result['highres'] = region[:, py1:py2, px1:px2]
+
+        elif self.pairing_mode == 'same_class':
+            # ── Same-class: D₀, D₁, D₂ from different images of the SAME class ──
+            # 对应 MD: 同一体系，但不同模拟 run
+            same_class_indices = self.class_to_indices[label]
+            
+            # D₂: 随机选同类别的一张图 → 低清全图
+            idx2 = same_class_indices[np.random.randint(len(same_class_indices))]
+            img2, _ = self.dataset[idx2]
+            img2 = self._normalize(img2)
+            result['full_low'] = self._downsample(img2, self.full_downsample)
+            
+            # D₁: 随机选同类别的一张图 → 随机裁切中分辨区域
+            idx1 = same_class_indices[np.random.randint(len(same_class_indices))]
+            img1, _ = self.dataset[idx1]
+            img1 = self._normalize(img1)
+            y1 = np.random.randint(0, img1.shape[1] - self.midres_span + 1)
+            x1 = np.random.randint(0, img1.shape[2] - self.midres_span + 1)
+            region1 = img1[:, y1:y1+self.midres_span, x1:x1+self.midres_span]
+            result['midres'] = self._downsample(region1, self.midres_downsample)
+            
+            # D₀: 随机选同类别的一张图 → 随机裁切高清 patch
+            if self.n_levels >= 3:
+                idx0 = same_class_indices[np.random.randint(len(same_class_indices))]
+                img0, _ = self.dataset[idx0]
+                img0 = self._normalize(img0)
+                py1 = np.random.randint(0, img0.shape[1] - self.patch_size + 1)
+                px1 = np.random.randint(0, img0.shape[2] - self.patch_size + 1)
+                result['highres'] = img0[:, py1:py1+self.patch_size, px1:px1+self.patch_size]
+
+        else:  # 'random'
+            # ── Random: D₀, D₁, D₂ from random images (any class) ──
+            total = len(self.dataset)
+            
+            # D₂
+            idx2 = np.random.randint(total)
+            img2, _ = self.dataset[idx2]
+            result['full_low'] = self._downsample(self._normalize(img2), self.full_downsample)
+            
+            # D₁
+            idx1 = np.random.randint(total)
+            img1, _ = self.dataset[idx1]
+            img1 = self._normalize(img1)
+            y1 = np.random.randint(0, img1.shape[1] - self.midres_span + 1)
+            x1 = np.random.randint(0, img1.shape[2] - self.midres_span + 1)
+            result['midres'] = self._downsample(
+                img1[:, y1:y1+self.midres_span, x1:x1+self.midres_span], 
+                self.midres_downsample
+            )
+            
+            # D₀
+            if self.n_levels >= 3:
+                idx0 = np.random.randint(total)
+                img0, _ = self.dataset[idx0]
+                img0 = self._normalize(img0)
+                py1 = np.random.randint(0, img0.shape[1] - self.patch_size + 1)
+                px1 = np.random.randint(0, img0.shape[2] - self.patch_size + 1)
+                result['highres'] = img0[:, py1:py1+self.patch_size, px1:px1+self.patch_size]
+
         return result
 
 
